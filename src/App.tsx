@@ -73,6 +73,10 @@ type Dataset = {
   zones: Zone[];
 };
 
+function getCoordinateKey(coordinate: Coordinate) {
+  return `${coordinate.latitude},${coordinate.longitude}`;
+}
+
 function cloneCoordinate(coordinate: Coordinate): Coordinate {
   return {
     latitude: coordinate.latitude,
@@ -337,6 +341,8 @@ export default function App() {
   );
 
   const editableDatasetVisible = datasetVisibility[EDITABLE_DATASET_ID] ?? true;
+  const singleEditSnappingVisible =
+    mode === 'edit-single' && snappingEnabled && Boolean(selectedZoneId);
 
   const loadMahalas = async () => {
     setLoadState('loading');
@@ -642,21 +648,29 @@ export default function App() {
                 Draw Mahala
               </div>
             </button>
-            {mode === 'draw' ? (
-              <div className="mt-1 flex items-center justify-between rounded border border-neutral-100 bg-neutral-50 px-3 py-1">
-                <label
-                  htmlFor="snapping"
-                  className="text-sm font-medium text-neutral-600"
-                >
-                  Snap to existing points
-                </label>
-                <input
-                  type="checkbox"
-                  id="snapping"
-                  checked={snappingEnabled}
-                  onChange={(event) => setSnappingEnabled(event.target.checked)}
-                  className="h-4 w-4 rounded text-purple-600 focus:ring-purple-500"
-                />
+            {mode === 'draw' || mode === 'edit-single' ? (
+              <div className="mt-1 rounded border border-neutral-100 bg-neutral-50 px-3 py-2">
+                <div className="flex items-center justify-between">
+                  <label
+                    htmlFor="snapping"
+                    className="text-sm font-medium text-neutral-600"
+                  >
+                    Snap to existing points
+                  </label>
+                  <input
+                    type="checkbox"
+                    id="snapping"
+                    checked={snappingEnabled}
+                    onChange={(event) => setSnappingEnabled(event.target.checked)}
+                    className="h-4 w-4 rounded text-purple-600 focus:ring-purple-500"
+                  />
+                </div>
+                {mode === 'edit-single' ? (
+                  <p className="mt-2 text-xs leading-5 text-neutral-500">
+                    Turn on the Sarajevo dataset if you want single-polygon
+                    vertices to snap to Sarajevo border points.
+                  </p>
+                ) : null}
               </div>
             ) : null}
             <button
@@ -952,8 +966,11 @@ export default function App() {
             </>
           ) : null}
 
-          {mode === 'draw' && snappingEnabled ? (
-            <AllVertices datasets={visibleDatasets} drawingCoords={drawingCoords} />
+          {(mode === 'draw' || singleEditSnappingVisible) && snappingEnabled ? (
+            <AllVertices
+              datasets={visibleDatasets}
+              drawingCoords={mode === 'draw' ? drawingCoords : []}
+            />
           ) : null}
 
           {mode === 'edit-shared' && editableDatasetVisible ? (
@@ -972,6 +989,8 @@ export default function App() {
               selectedZoneId={selectedZoneId}
               updateVertex={updateVertexSingle}
               insertVertex={insertVertexSingle}
+              snappingEnabled={snappingEnabled}
+              snapDatasets={visibleDatasets}
             />
           ) : null}
         </MapContainer>
@@ -1100,11 +1119,17 @@ function getClosestVertex(
   datasets: Dataset[],
   drawingCoords: Coordinate[] = [],
   threshold = 0.001,
+  excludedCoordinates: Coordinate[] = [],
 ) {
   let closest: Coordinate | null = null;
   let minimumDistance = Infinity;
+  const excludedKeys = new Set(excludedCoordinates.map(getCoordinateKey));
 
   const inspectCoordinate = (candidate: Coordinate) => {
+    if (excludedKeys.has(getCoordinateKey(candidate))) {
+      return;
+    }
+
     const dx = candidate.longitude - coordinate.longitude;
     const dy = candidate.latitude - coordinate.latitude;
     const distance = Math.sqrt(dx * dx + dy * dy);
@@ -1235,6 +1260,8 @@ function SingleEditMarkers({
   selectedZoneId,
   updateVertex,
   insertVertex,
+  snappingEnabled,
+  snapDatasets,
 }: {
   zones: Zone[];
   selectedZoneId: string;
@@ -1244,6 +1271,8 @@ function SingleEditMarkers({
     insertIndex: number,
     coordinate: Coordinate,
   ) => void;
+  snappingEnabled: boolean;
+  snapDatasets: Dataset[];
 }) {
   const customIcon = new L.Icon({
     iconUrl,
@@ -1279,6 +1308,9 @@ function SingleEditMarkers({
                 updateVertex(selectedZone.id, index, newCoordinate)
               }
               icon={customIcon}
+              snappingEnabled={snappingEnabled}
+              snapDatasets={snapDatasets}
+              excludedCoordinates={[coordinate]}
             />
             <CircleMarker
               center={[midpoint.latitude, midpoint.longitude]}
@@ -1359,10 +1391,18 @@ function DraggableMarker({
   coord,
   onUpdate,
   icon,
+  snappingEnabled = false,
+  snapDatasets = [],
+  excludedCoordinates = [],
+  snapThreshold = 0.001,
 }: {
   coord: Coordinate;
   onUpdate: (coordinate: Coordinate) => void;
   icon: L.Icon;
+  snappingEnabled?: boolean;
+  snapDatasets?: Dataset[];
+  excludedCoordinates?: Coordinate[];
+  snapThreshold?: number;
 }) {
   const markerRef = useRef<L.Marker>(null);
 
@@ -1376,10 +1416,36 @@ function DraggableMarker({
         }
 
         const position = marker.getLatLng();
-        onUpdate({ latitude: position.lat, longitude: position.lng });
+        let nextCoordinate = {
+          latitude: position.lat,
+          longitude: position.lng,
+        };
+
+        if (snappingEnabled) {
+          const snappedCoordinate = getClosestVertex(
+            nextCoordinate,
+            snapDatasets,
+            [],
+            snapThreshold,
+            excludedCoordinates,
+          );
+
+          if (snappedCoordinate) {
+            nextCoordinate = cloneCoordinate(snappedCoordinate);
+            marker.setLatLng([nextCoordinate.latitude, nextCoordinate.longitude]);
+          }
+        }
+
+        onUpdate(nextCoordinate);
       },
     }),
-    [onUpdate],
+    [
+      excludedCoordinates,
+      onUpdate,
+      snapDatasets,
+      snapThreshold,
+      snappingEnabled,
+    ],
   );
 
   return (
