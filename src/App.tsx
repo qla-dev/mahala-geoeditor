@@ -1,4 +1,5 @@
 import { useState, useMemo, useRef, useEffect, Fragment } from 'react';
+import type { CSSProperties } from 'react';
 import {
   MapContainer,
   TileLayer,
@@ -71,6 +72,42 @@ type Dataset = {
   visible: boolean;
   color: string;
   zones: Zone[];
+};
+type FocusedZone = {
+  datasetId: string;
+  zoneId: string;
+};
+type BasemapMode = 'street' | 'satellite';
+
+const BASEMAPS: Record<
+  BasemapMode,
+  {
+    label: string;
+    description: string;
+    baseUrl: string;
+    attribution: string;
+    labelsUrl?: string;
+    labelsAttribution?: string;
+  }
+> = {
+  street: {
+    label: 'Street',
+    description: 'Carto light street map',
+    baseUrl: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
+    attribution:
+      '&copy; OpenStreetMap contributors &copy; CARTO',
+  },
+  satellite: {
+    label: 'Satellite',
+    description: 'Esri imagery with place labels',
+    baseUrl:
+      'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    attribution:
+      'Tiles &copy; Esri, Maxar, Earthstar Geographics, and the GIS User Community',
+    labelsUrl:
+      'https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
+    labelsAttribution: 'Labels &copy; Esri',
+  },
 };
 
 function getCoordinateKey(coordinate: Coordinate) {
@@ -290,6 +327,8 @@ export default function App() {
     'view' | 'draw' | 'edit-shared' | 'edit-single'
   >('view');
   const [selectedZoneId, setSelectedZoneId] = useState<string | null>(null);
+  const [focusedZone, setFocusedZone] = useState<FocusedZone | null>(null);
+  const [basemapMode, setBasemapMode] = useState<BasemapMode>('street');
   const [snappingEnabled, setSnappingEnabled] = useState(true);
   const [zoneMetadata, setZoneMetadata] = useState<string | null>(null);
   const [drawingCoords, setDrawingCoords] = useState<Coordinate[]>([]);
@@ -341,8 +380,16 @@ export default function App() {
   );
 
   const editableDatasetVisible = datasetVisibility[EDITABLE_DATASET_ID] ?? true;
-  const singleEditSnappingVisible =
-    mode === 'edit-single' && snappingEnabled && Boolean(selectedZoneId);
+  const activeBasemap = BASEMAPS[basemapMode];
+  const drawModeCursorStyle = useMemo(
+    () =>
+      mode === 'draw'
+        ? ({
+            '--draw-mode-cursor': `url(${iconUrl}) 12 41, auto`,
+          } as CSSProperties)
+        : undefined,
+    [mode],
+  );
 
   const loadMahalas = async () => {
     setLoadState('loading');
@@ -443,6 +490,39 @@ export default function App() {
     setSaveMessage(`"${newZone.name}" is ready to save to the database.`);
   };
 
+  useEffect(() => {
+    if (mode !== 'draw') {
+      return;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const tagName = target?.tagName;
+
+      if (
+        target?.isContentEditable ||
+        tagName === 'INPUT' ||
+        tagName === 'TEXTAREA' ||
+        tagName === 'SELECT'
+      ) {
+        return;
+      }
+
+      if (event.key !== 'Enter' && event.key !== 'NumpadEnter') {
+        return;
+      }
+
+      event.preventDefault();
+      handleFinishDraw();
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [drawingCoords.length, mode]);
+
   const toggleDataset = (datasetId: string) => {
     setDatasetVisibility((current) => ({
       ...current,
@@ -490,6 +570,35 @@ export default function App() {
         return syncZoneCenter({ ...zone, coordinates });
       }),
     );
+    setSaveState('idle');
+    setSaveMessage(null);
+  };
+
+  const removeVertexSingle = (zoneId: string, index: number) => {
+    let deletionBlocked = false;
+
+    setMahalaZones((current) =>
+      current.map((zone) => {
+        if (zone.id !== zoneId) {
+          return zone;
+        }
+
+        if (zone.coordinates.length <= 3) {
+          deletionBlocked = true;
+          return zone;
+        }
+
+        const coordinates = cloneRing(zone.coordinates);
+        coordinates.splice(index, 1);
+        return syncZoneCenter({ ...zone, coordinates });
+      }),
+    );
+
+    if (deletionBlocked) {
+      alert('A polygon must keep at least 3 points.');
+      return;
+    }
+
     setSaveState('idle');
     setSaveMessage(null);
   };
@@ -551,6 +660,49 @@ export default function App() {
         return syncZoneCenter({ ...zone, coordinates });
       }),
     );
+    setSaveState('idle');
+    setSaveMessage(null);
+  };
+
+  const removeVertexShared = (targetCoord: Coordinate) => {
+    let deletionBlocked = false;
+    let changed = false;
+
+    setMahalaZones((current) => {
+      const affectedZones = current.filter((zone) =>
+        zone.coordinates.some((coordinate) => sameCoordinate(coordinate, targetCoord)),
+      );
+
+      if (affectedZones.some((zone) => zone.coordinates.length <= 3)) {
+        deletionBlocked = true;
+        return current;
+      }
+
+      return current.map((zone) => {
+        const removeIndex = zone.coordinates.findIndex((coordinate) =>
+          sameCoordinate(coordinate, targetCoord),
+        );
+
+        if (removeIndex === -1) {
+          return zone;
+        }
+
+        const coordinates = cloneRing(zone.coordinates);
+        coordinates.splice(removeIndex, 1);
+        changed = true;
+        return syncZoneCenter({ ...zone, coordinates });
+      });
+    });
+
+    if (deletionBlocked) {
+      alert('A polygon must keep at least 3 points.');
+      return;
+    }
+
+    if (!changed) {
+      return;
+    }
+
     setSaveState('idle');
     setSaveMessage(null);
   };
@@ -667,8 +819,9 @@ export default function App() {
                 </div>
                 {mode === 'edit-single' ? (
                   <p className="mt-2 text-xs leading-5 text-neutral-500">
-                    Turn on the Sarajevo dataset if you want single-polygon
-                    vertices to snap to Sarajevo border points.
+                    When this is on, click one vertex to select it, then click
+                    an existing visible point to snap there. Turn it off for
+                    free dragging with no snap checks.
                   </p>
                 ) : null}
               </div>
@@ -712,6 +865,31 @@ export default function App() {
           </div>
 
           <h2 className="mb-3 text-xs font-bold uppercase tracking-wider text-neutral-400">
+            Basemap
+          </h2>
+          <div className="mb-6 space-y-2">
+            {(Object.entries(BASEMAPS) as [BasemapMode, (typeof BASEMAPS)[BasemapMode]][]).map(
+              ([basemapId, basemap]) => (
+                <button
+                  key={basemapId}
+                  type="button"
+                  onClick={() => setBasemapMode(basemapId)}
+                  className={`w-full rounded-lg border px-3 py-2 text-left transition ${
+                    basemapMode === basemapId
+                      ? 'border-purple-200 bg-purple-50 text-purple-700'
+                      : 'border-neutral-100 bg-neutral-50 hover:bg-neutral-100'
+                  }`}
+                >
+                  <div className="text-sm font-medium">{basemap.label}</div>
+                  <div className="mt-1 text-xs text-neutral-500">
+                    {basemap.description}
+                  </div>
+                </button>
+              ),
+            )}
+          </div>
+
+          <h2 className="mb-3 text-xs font-bold uppercase tracking-wider text-neutral-400">
             Datasets
           </h2>
           <div className="space-y-2">
@@ -742,9 +920,23 @@ export default function App() {
                 {dataset.visible ? (
                   <div className="max-h-48 overflow-y-auto px-3 pb-3">
                     {dataset.zones.map((zone) => (
-                      <div
+                      <button
                         key={zone.id}
-                        className="flex items-center justify-between py-1 text-xs"
+                        type="button"
+                        onClick={() => {
+                          setFocusedZone({
+                            datasetId: dataset.id,
+                            zoneId: zone.id,
+                          });
+
+                          if (
+                            mode === 'edit-single' &&
+                            dataset.id === EDITABLE_DATASET_ID
+                          ) {
+                            setSelectedZoneId(zone.id);
+                          }
+                        }}
+                        className="flex w-full items-center justify-between rounded px-1 py-1 text-left text-xs transition hover:bg-neutral-100"
                       >
                         <div className="flex min-w-0 items-center gap-2 pr-2">
                           <span className="truncate">{zone.name}</span>
@@ -758,7 +950,7 @@ export default function App() {
                         <span className="text-neutral-400">
                           {zone.coordinates.length} pts
                         </span>
-                      </div>
+                      </button>
                     ))}
                     {dataset.id === EDITABLE_DATASET_ID &&
                     loadState === 'loading' ? (
@@ -783,13 +975,13 @@ export default function App() {
           <div className="border-t border-neutral-100 bg-purple-50 p-4">
             <p className="mb-3 text-sm text-purple-800">
               Click on the map to add points. It can snap to visible polygon
-              vertices.
+              vertices. Press Enter to finish.
             </p>
             <button
               onClick={handleFinishDraw}
               className="w-full rounded-md bg-purple-600 py-2 font-medium text-white shadow-sm transition hover:bg-purple-700"
             >
-              Finish Polygon
+              Finish Polygon (Enter)
             </button>
           </div>
         ) : null}
@@ -858,12 +1050,20 @@ export default function App() {
         <MapContainer
           center={DEFAULT_MAP_CENTER}
           zoom={12}
-          className="h-full w-full"
+          className={`h-full w-full ${mode === 'draw' ? 'draw-mode-map' : ''}`}
+          style={drawModeCursorStyle}
         >
           <TileLayer
-            attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-            url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
+            attribution={activeBasemap.attribution}
+            url={activeBasemap.baseUrl}
           />
+          {activeBasemap.labelsUrl ? (
+            <TileLayer
+              attribution={activeBasemap.labelsAttribution}
+              url={activeBasemap.labelsUrl}
+              opacity={1}
+            />
+          ) : null}
           <MapController
             onMapClick={handleMapClick}
             setMousePos={setMousePos}
@@ -871,6 +1071,11 @@ export default function App() {
             snappingEnabled={snappingEnabled}
             datasets={visibleDatasets}
             drawingCoords={drawingCoords}
+          />
+          <FocusedZoneController
+            datasets={datasets}
+            focusedZone={focusedZone}
+            onFocusedZoneHandled={() => setFocusedZone(null)}
           />
 
           {datasets.map((dataset) => {
@@ -943,6 +1148,29 @@ export default function App() {
                   }}
                 />
               ) : null}
+              {drawingCoords.length > 0 && mousePos ? (
+                <Polyline
+                  positions={[
+                    [
+                      drawingCoords[drawingCoords.length - 1].latitude,
+                      drawingCoords[drawingCoords.length - 1].longitude,
+                    ],
+                    [mousePos.latitude, mousePos.longitude],
+                  ]}
+                  pathOptions={{
+                    color: '#ec4899',
+                    weight: 2,
+                    opacity: 0.85,
+                    dashArray: '5, 5',
+                  }}
+                />
+              ) : null}
+              {mousePos ? (
+                <Marker
+                  position={[mousePos.latitude, mousePos.longitude]}
+                  icon={globalCustomIcon}
+                />
+              ) : null}
               {mousePos &&
               snappingEnabled &&
               getClosestVertex(mousePos, visibleDatasets, drawingCoords) ? (
@@ -966,7 +1194,7 @@ export default function App() {
             </>
           ) : null}
 
-          {(mode === 'draw' || singleEditSnappingVisible) && snappingEnabled ? (
+          {mode === 'draw' && snappingEnabled ? (
             <AllVertices
               datasets={visibleDatasets}
               drawingCoords={mode === 'draw' ? drawingCoords : []}
@@ -977,6 +1205,7 @@ export default function App() {
             <SharedEditMarkers
               zones={mahalaZones}
               updateVertex={updateVertexShared}
+              removeVertex={removeVertexShared}
               insertVertex={insertVertexShared}
             />
           ) : null}
@@ -988,6 +1217,7 @@ export default function App() {
               zones={mahalaZones}
               selectedZoneId={selectedZoneId}
               updateVertex={updateVertexSingle}
+              removeVertex={removeVertexSingle}
               insertVertex={insertVertexSingle}
               snappingEnabled={snappingEnabled}
               snapDatasets={visibleDatasets}
@@ -1114,6 +1344,53 @@ function MapController({
   return null;
 }
 
+function FocusedZoneController({
+  datasets,
+  focusedZone,
+  onFocusedZoneHandled,
+}: {
+  datasets: Dataset[];
+  focusedZone: FocusedZone | null;
+  onFocusedZoneHandled: () => void;
+}) {
+  const map = useMapEvents({});
+
+  useEffect(() => {
+    if (!focusedZone) {
+      return;
+    }
+
+    const zone = datasets
+      .find((dataset) => dataset.id === focusedZone.datasetId)
+      ?.zones.find((candidate) => candidate.id === focusedZone.zoneId);
+
+    if (!zone || zone.coordinates.length === 0) {
+      onFocusedZoneHandled();
+      return;
+    }
+
+    const bounds = L.latLngBounds(
+      zone.coordinates.map((coordinate) => [
+        coordinate.latitude,
+        coordinate.longitude,
+      ]),
+    );
+
+    if (!bounds.isValid()) {
+      onFocusedZoneHandled();
+      return;
+    }
+
+    map.fitBounds(bounds.pad(0.2), {
+      maxZoom: 16,
+      animate: true,
+    });
+    onFocusedZoneHandled();
+  }, [datasets, focusedZone, map, onFocusedZoneHandled]);
+
+  return null;
+}
+
 function getClosestVertex(
   coordinate: Coordinate,
   datasets: Dataset[],
@@ -1158,10 +1435,12 @@ function getClosestVertex(
 function SharedEditMarkers({
   zones,
   updateVertex,
+  removeVertex,
   insertVertex,
 }: {
   zones: Zone[];
   updateVertex: (oldCoord: Coordinate, newCoord: Coordinate) => void;
+  removeVertex: (coordinate: Coordinate) => void;
   insertVertex: (
     firstCoord: Coordinate,
     secondCoord: Coordinate,
@@ -1226,6 +1505,7 @@ function SharedEditMarkers({
             onUpdate={(newCoordinate) =>
               updateVertex(coordinate, newCoordinate)
             }
+            onDelete={() => removeVertex(coordinate)}
             icon={customIcon}
           />
         </Fragment>
@@ -1259,6 +1539,7 @@ function SingleEditMarkers({
   zones,
   selectedZoneId,
   updateVertex,
+  removeVertex,
   insertVertex,
   snappingEnabled,
   snapDatasets,
@@ -1266,6 +1547,7 @@ function SingleEditMarkers({
   zones: Zone[];
   selectedZoneId: string;
   updateVertex: (zoneId: string, index: number, coordinate: Coordinate) => void;
+  removeVertex: (zoneId: string, index: number) => void;
   insertVertex: (
     zoneId: string,
     insertIndex: number,
@@ -1280,11 +1562,47 @@ function SingleEditMarkers({
     iconSize: [25, 41],
     iconAnchor: [12, 41],
   });
+  const [selectedVertexIndex, setSelectedVertexIndex] = useState<number | null>(
+    null,
+  );
 
   const selectedZone = useMemo(
     () => zones.find((zone) => zone.id === selectedZoneId) ?? null,
     [zones, selectedZoneId],
   );
+  const snapTargetCoordinates = useMemo(() => {
+    if (!snappingEnabled) {
+      return [];
+    }
+
+    const coordinatesMap = new Map<string, Coordinate>();
+
+    snapDatasets.forEach((dataset) => {
+      if (!dataset.visible) {
+        return;
+      }
+
+      dataset.zones.forEach((zone) => {
+        if (dataset.id === EDITABLE_DATASET_ID && zone.id === selectedZoneId) {
+          return;
+        }
+
+        zone.coordinates.forEach((coordinate) => {
+          const key = getCoordinateKey(coordinate);
+
+          if (!coordinatesMap.has(key)) {
+            coordinatesMap.set(key, coordinate);
+          }
+        });
+      });
+    });
+
+    return Array.from(coordinatesMap.values());
+  }, [selectedZoneId, snapDatasets, snappingEnabled]);
+
+  useEffect(() => {
+    setSelectedVertexIndex(null);
+  }, [selectedZoneId, snappingEnabled]);
 
   if (!selectedZone) {
     return null;
@@ -1292,6 +1610,31 @@ function SingleEditMarkers({
 
   return (
     <>
+      {snappingEnabled && selectedVertexIndex !== null
+        ? snapTargetCoordinates.map((coordinate) => (
+            <CircleMarker
+              key={`snap-target:${coordinate.latitude},${coordinate.longitude}`}
+              center={[coordinate.latitude, coordinate.longitude]}
+              radius={6}
+              pathOptions={{
+                color: '#f59e0b',
+                fillColor: '#fff7ed',
+                fillOpacity: 1,
+                weight: 2,
+              }}
+              eventHandlers={{
+                click: () => {
+                  updateVertex(
+                    selectedZone.id,
+                    selectedVertexIndex,
+                    cloneCoordinate(coordinate),
+                  );
+                  setSelectedVertexIndex(null);
+                },
+              }}
+            />
+          ))
+        : null}
       {selectedZone.coordinates.map((coordinate, index) => {
         const nextIndex = (index + 1) % selectedZone.coordinates.length;
         const nextCoordinate = selectedZone.coordinates[nextIndex];
@@ -1301,17 +1644,50 @@ function SingleEditMarkers({
         };
 
         return (
-          <Fragment key={`${index}-${coordinate.latitude},${coordinate.longitude}`}>
-            <DraggableMarker
-              coord={coordinate}
-              onUpdate={(newCoordinate) =>
-                updateVertex(selectedZone.id, index, newCoordinate)
-              }
-              icon={customIcon}
-              snappingEnabled={snappingEnabled}
-              snapDatasets={snapDatasets}
-              excludedCoordinates={[coordinate]}
-            />
+          <Fragment key={`${selectedZone.id}:vertex:${index}`}>
+            {snappingEnabled ? (
+              <>
+                {selectedVertexIndex === index ? (
+                  <CircleMarker
+                    center={[coordinate.latitude, coordinate.longitude]}
+                    radius={10}
+                    pathOptions={{
+                      color: '#f59e0b',
+                      fillColor: '#fef3c7',
+                      fillOpacity: 0.65,
+                      weight: 3,
+                    }}
+                  />
+                ) : null}
+                <Marker
+                  position={[coordinate.latitude, coordinate.longitude]}
+                  icon={customIcon}
+                  eventHandlers={{
+                    click: () => {
+                      setSelectedVertexIndex((current) =>
+                        current === index ? null : index,
+                      );
+                    },
+                    contextmenu: (event) => {
+                      event.originalEvent.preventDefault();
+                      removeVertex(selectedZone.id, index);
+                      setSelectedVertexIndex((current) =>
+                        current === index ? null : current,
+                      );
+                    },
+                  }}
+                />
+              </>
+            ) : (
+              <DraggableMarker
+                coord={coordinate}
+                onUpdate={(newCoordinate) =>
+                  updateVertex(selectedZone.id, index, newCoordinate)
+                }
+                onDelete={() => removeVertex(selectedZone.id, index)}
+                icon={customIcon}
+              />
+            )}
             <CircleMarker
               center={[midpoint.latitude, midpoint.longitude]}
               radius={5}
@@ -1373,6 +1749,7 @@ function AllVertices({
       {uniqueCoordinates.map((coordinate) => (
         <CircleMarker
           key={`${coordinate.latitude},${coordinate.longitude}`}
+          interactive={false}
           center={[coordinate.latitude, coordinate.longitude]}
           radius={3}
           pathOptions={{
@@ -1390,19 +1767,13 @@ function AllVertices({
 function DraggableMarker({
   coord,
   onUpdate,
+  onDelete,
   icon,
-  snappingEnabled = false,
-  snapDatasets = [],
-  excludedCoordinates = [],
-  snapThreshold = 0.001,
 }: {
   coord: Coordinate;
   onUpdate: (coordinate: Coordinate) => void;
+  onDelete?: () => void;
   icon: L.Icon;
-  snappingEnabled?: boolean;
-  snapDatasets?: Dataset[];
-  excludedCoordinates?: Coordinate[];
-  snapThreshold?: number;
 }) {
   const markerRef = useRef<L.Marker>(null);
 
@@ -1416,36 +1787,19 @@ function DraggableMarker({
         }
 
         const position = marker.getLatLng();
-        let nextCoordinate = {
+        const nextCoordinate = {
           latitude: position.lat,
           longitude: position.lng,
         };
 
-        if (snappingEnabled) {
-          const snappedCoordinate = getClosestVertex(
-            nextCoordinate,
-            snapDatasets,
-            [],
-            snapThreshold,
-            excludedCoordinates,
-          );
-
-          if (snappedCoordinate) {
-            nextCoordinate = cloneCoordinate(snappedCoordinate);
-            marker.setLatLng([nextCoordinate.latitude, nextCoordinate.longitude]);
-          }
-        }
-
         onUpdate(nextCoordinate);
       },
+      contextmenu(event) {
+        event.originalEvent.preventDefault();
+        onDelete?.();
+      },
     }),
-    [
-      excludedCoordinates,
-      onUpdate,
-      snapDatasets,
-      snapThreshold,
-      snappingEnabled,
-    ],
+    [onDelete, onUpdate],
   );
 
   return (

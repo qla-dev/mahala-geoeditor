@@ -1,1 +1,21 @@
 @import "tailwindcss";
+
+.draw-mode-map,
+.draw-mode-map.leaflet-grab,
+.draw-mode-map.leaflet-dragging,
+.draw-mode-map.leaflet-drag-target,
+.draw-mode-map .leaflet-container,
+.draw-mode-map .leaflet-grab,
+.draw-mode-map .leaflet-dragging,
+.draw-mode-map .leaflet-drag-target,
+.draw-mode-map .leaflet-interactive,
+.draw-mode-map .leaflet-marker-draggable,
+.draw-mode-map .leaflet-pane,
+.draw-mode-map .leaflet-tile-pane,
+.draw-mode-map .leaflet-overlay-pane,
+.draw-mode-map .leaflet-shadow-pane,
+.draw-mode-map .leaflet-marker-pane,
+.draw-mode-map .leaflet-tooltip-pane,
+.draw-mode-map .leaflet-popup-pane {
+  cursor: var(--draw-mode-cursor), auto !important;
+}
