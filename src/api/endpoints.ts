@@ -2,23 +2,11 @@ const env = (import.meta as ImportMeta & {
   env?: Record<string, string | undefined>;
 }).env;
 
-const fallbackHost =
-  typeof window !== 'undefined' && window.location.hostname
-    ? window.location.hostname
-    : '127.0.0.1';
-
-const fallbackProtocol =
-  typeof window !== 'undefined' && window.location.protocol === 'https:'
-    ? 'https:'
-    : 'http:';
-
-const baseUrl =
-  env?.VITE_MAHALA_API_BASE_URL ||
-  `${fallbackProtocol}//${fallbackHost}/mahala/mahala-backend/public/api`;
+const baseUrl = (env?.VITE_MAHALA_DB_BASE_URL || '').replace(/\/+$/, '');
 
 const endpoints = {
-  mahalas: `${baseUrl}/mahalas`,
-  bulkSaveMahalas: `${baseUrl}/mahalas/bulk-save`,
+  mahalas: `${baseUrl}/db/mahalas`,
+  bulkSaveMahalas: `${baseUrl}/db/mahalas/bulk-save`,
 };
 
 export default endpoints;

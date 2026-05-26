@@ -2,19 +2,27 @@
 <img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
 </div>
 
-# Run and deploy your AI Studio app
+# Run the geoeditor
 
-This contains everything you need to run your app locally.
-
-View your app in AI Studio: https://ai.studio/apps/e43453f5-e41b-4a45-9b68-3a11e6585962
+`mahala-geoeditor` now reads and writes `mahalas` directly from MySQL through
+its own Vite server middleware. It no longer depends on the Laravel API routes.
 
 ## Run Locally
 
-**Prerequisites:**  Node.js
-
+**Prerequisites:** Node.js, access to the MySQL database used by `mahala-backend`
 
 1. Install dependencies:
    `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
+2. Configure DB access in `.env` using `MAHALA_DB_*` variables if you do not
+   want to reuse `../mahala-backend/.env`.
+3. Run the editor:
    `npm run dev`
+
+## Notes
+
+- The React app calls `/db/mahalas` and `/db/mahalas/bulk-save` on the same
+  origin.
+- Those routes are implemented inside `vite.config.ts` via
+  [server/mahalaDbPlugin.js](server/mahalaDbPlugin.js).
+- If `MAHALA_DB_*` is not set in `mahala-geoeditor`, the editor falls back to
+  `../mahala-backend/.env`.
