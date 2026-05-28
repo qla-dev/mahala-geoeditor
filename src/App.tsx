@@ -41,6 +41,8 @@ const GEOEDITOR_USERNAME = 'qla.dev';
 const GEOEDITOR_PASSWORD = 'password123';
 const ACTIVE_ZONE_LABEL_MIN_ZOOM = 0;
 const BOUNDARY_ZONE_LABEL_MIN_ZOOM = 9.3;
+const SARAJEVO_MIN_ZOOM = 10;
+const SARAJEVO_POLYGON_LABEL_MIN_ZOOM = 11;
 const USER_MAHALA_LEVEL_1_LABEL_MIN_ZOOM = 12.3;
 const USER_MAHALA_LEVEL_2_LABEL_MIN_ZOOM = 13.6;
 
@@ -1375,18 +1377,30 @@ export default function App() {
                   {zone.name ? (
                     currentZoom >=
                     (dataset.id === 'sarajevo'
-                      ? BOUNDARY_ZONE_LABEL_MIN_ZOOM
+                      ? SARAJEVO_POLYGON_LABEL_MIN_ZOOM
                       : zone.level === 1
                       ? USER_MAHALA_LEVEL_1_LABEL_MIN_ZOOM
                       : USER_MAHALA_LEVEL_2_LABEL_MIN_ZOOM) ? (
                       <Tooltip
                         permanent
                         direction="center"
-                        className="rounded border-none bg-white/80 px-2 py-1 text-xs font-semibold shadow-sm"
+                        className="rounded border-none bg-white/80 text-xs font-semibold shadow-sm"
                         opacity={0.9}
                         style={{
                           color: dataset.color,
                           border: `1px solid ${dataset.color}`,
+                          fontSize:
+                            dataset.id === 'sarajevo' || !dataset.id.startsWith('user-mahalas')
+                              ? 12
+                              : zone.level === 1
+                              ? 8
+                              : 6,
+                          padding:
+                            dataset.id.startsWith('user-mahalas')
+                              ? zone.level === 1
+                                ? '4px 6px'
+                                : '3px 4px'
+                              : '6px 10px',
                         }}
                       >
                         {zone.name}
@@ -1397,6 +1411,27 @@ export default function App() {
               );
             });
           })}
+
+          {visibleDatasets.some((dataset) => dataset.id === 'sarajevo') &&
+          currentZoom >= SARAJEVO_MIN_ZOOM &&
+          currentZoom < SARAJEVO_POLYGON_LABEL_MIN_ZOOM ? (
+            <Marker position={DEFAULT_MAP_CENTER}>
+              <Tooltip
+                permanent
+                direction="center"
+                className="rounded border-none bg-white/80 text-xs font-semibold shadow-sm"
+                opacity={0.9}
+                style={{
+                  color: '#7c3aed',
+                  border: '1px solid #7c3aed',
+                  fontSize: 12,
+                  padding: '6px 10px',
+                }}
+              >
+                Sarajevo
+              </Tooltip>
+            </Marker>
+          ) : null}
 
           {mode === 'draw' ? (
             <>
