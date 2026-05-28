@@ -1,5 +1,5 @@
 import { useState, useMemo, useRef, useEffect, Fragment } from 'react';
-import type { CSSProperties } from 'react';
+import type { CSSProperties, FormEvent } from 'react';
 import {
   MapContainer,
   TileLayer,
@@ -36,6 +36,13 @@ import shadowUrl from 'leaflet/dist/images/marker-shadow.png';
 const EDITABLE_DATASET_ID = 'mahalas';
 const DRAW_ZONE_STATUS = 'draft';
 const DEFAULT_MAP_CENTER: [number, number] = [43.8563, 18.4131];
+const GEOEDITOR_AUTH_STORAGE_KEY = 'mahala.geoeditor.authenticated';
+const GEOEDITOR_USERNAME = 'qla.dev';
+const GEOEDITOR_PASSWORD = 'password123';
+const ACTIVE_ZONE_LABEL_MIN_ZOOM = 0;
+const BOUNDARY_ZONE_LABEL_MIN_ZOOM = 9.3;
+const USER_MAHALA_LEVEL_1_LABEL_MIN_ZOOM = 12.3;
+const USER_MAHALA_LEVEL_2_LABEL_MIN_ZOOM = 13.6;
 
 const globalCustomIcon = new L.Icon({
   iconUrl,
@@ -269,6 +276,29 @@ function zonesEqual(left: Zone, right: Zone) {
   );
 }
 
+function pointInPolygon(point: Coordinate, coordinates: Coordinate[]) {
+  let inside = false;
+  const x = point.longitude;
+  const y = point.latitude;
+
+  for (let i = 0, j = coordinates.length - 1; i < coordinates.length; j = i++) {
+    const xi = coordinates[i].longitude;
+    const yi = coordinates[i].latitude;
+    const xj = coordinates[j].longitude;
+    const yj = coordinates[j].latitude;
+
+    const intersect =
+      yi > y !== yj > y &&
+      x < ((xj - xi) * (y - yi)) / (yj - yi) + xi;
+
+    if (intersect) {
+      inside = !inside;
+    }
+  }
+
+  return inside;
+}
+
 function buildZoneId(name: string) {
   const slug = name
     .toLowerCase()
@@ -307,13 +337,18 @@ function getSaveLabel(count: number) {
 }
 
 export default function App() {
+  const [loginUsername, setLoginUsername] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [mahalaZones, setMahalaZones] = useState<Zone[]>([]);
   const [savedMahalaZones, setSavedMahalaZones] = useState<Zone[]>([]);
   const [datasetVisibility, setDatasetVisibility] = useState<
     Record<string, boolean>
   >({
-    [EDITABLE_DATASET_ID]: true,
-    sarajevo: false,
+    'user-mahalas-1': true,
+    'user-mahalas-2': true,
+    sarajevo: true,
   });
   const [loadState, setLoadState] = useState<'loading' | 'ready' | 'error'>(
     'loading',
@@ -322,6 +357,7 @@ export default function App() {
   const [saveState, setSaveState] = useState<
     'idle' | 'saving' | 'success' | 'error'
   >('idle');
+  const [currentZoom, setCurrentZoom] = useState<number>(12);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
   const [mode, setMode] = useState<
     'view' | 'draw' | 'edit-shared' | 'edit-single'
@@ -330,7 +366,10 @@ export default function App() {
   const [focusedZone, setFocusedZone] = useState<FocusedZone | null>(null);
   const [basemapMode, setBasemapMode] = useState<BasemapMode>('street');
   const [snappingEnabled, setSnappingEnabled] = useState(true);
-  const [zoneMetadata, setZoneMetadata] = useState<string | null>(null);
+  const [inspectZone, setInspectZone] = useState<Zone | null>(null);
+  const [mahalaSearch, setMahalaSearch] = useState<string>('');
+  const [inspectDraft, setInspectDraft] = useState<Zone | null>(null);
+  const [leftTab, setLeftTab] = useState<'tools' | 'basemap' | 'datasets'>('tools');
   const [drawingCoords, setDrawingCoords] = useState<Coordinate[]>([]);
   const [mousePos, setMousePos] = useState<Coordinate | null>(null);
 
@@ -355,22 +394,34 @@ export default function App() {
   );
 
   const datasets = useMemo<Dataset[]>(
-    () => [
-      {
-        id: EDITABLE_DATASET_ID,
-        name: 'User Mahalas',
-        visible: datasetVisibility[EDITABLE_DATASET_ID] ?? true,
-        color: '#3b82f6',
-        zones: mahalaZones,
-      },
-      {
-        id: 'sarajevo',
-        name: 'Sarajevo Polygons',
-        visible: datasetVisibility.sarajevo ?? false,
-        color: '#10b981',
-        zones: SARAJEVO_POLYGONS as Zone[],
-      },
-    ],
+    () => {
+      const user1 = mahalaZones.filter((zone) => zone.level === 1);
+      const user2 = mahalaZones.filter((zone) => zone.level === 2);
+
+      return [
+        {
+          id: 'sarajevo',
+          name: 'Sarajevo Borders',
+          visible: datasetVisibility.sarajevo ?? false,
+          color: '#7c3aed',
+          zones: SARAJEVO_POLYGONS as Zone[],
+        },
+        {
+          id: 'user-mahalas-1',
+          name: 'User Mahalas 1',
+          visible: datasetVisibility['user-mahalas-1'] ?? true,
+          color: '#3b82f6',
+          zones: user1,
+        },
+        {
+          id: 'user-mahalas-2',
+          name: 'User Mahalas 2',
+          visible: datasetVisibility['user-mahalas-2'] ?? true,
+          color: '#10b981',
+          zones: user2,
+        },
+      ];
+    },
     [datasetVisibility, mahalaZones],
   );
 
@@ -379,7 +430,9 @@ export default function App() {
     [datasets],
   );
 
-  const editableDatasetVisible = datasetVisibility[EDITABLE_DATASET_ID] ?? true;
+  const editableDatasetVisible =
+    (datasetVisibility['user-mahalas-1'] ?? true) ||
+    (datasetVisibility['user-mahalas-2'] ?? true);
   const activeBasemap = BASEMAPS[basemapMode];
   const drawModeCursorStyle = useMemo(
     () =>
@@ -421,8 +474,18 @@ export default function App() {
   };
 
   useEffect(() => {
-    void loadMahalas();
+    if (localStorage.getItem(GEOEDITOR_AUTH_STORAGE_KEY) === 'true') {
+      setIsAuthenticated(true);
+    }
   }, []);
+
+  useEffect(() => {
+    if (!isAuthenticated) {
+      return;
+    }
+
+    void loadMahalas();
+  }, [isAuthenticated]);
 
   useEffect(() => {
     if (mode !== 'draw') {
@@ -437,24 +500,34 @@ export default function App() {
   }, [mahalaZones, selectedZoneId]);
 
   const handleMapClick = (latlng: Coordinate) => {
-    if (mode !== 'draw') {
+    if (mode === 'draw') {
+      let nextPoint = latlng;
+
+      if (snappingEnabled) {
+        const snappedVertex = getClosestVertex(
+          latlng,
+          visibleDatasets,
+          drawingCoords,
+        );
+        if (snappedVertex) {
+          nextPoint = snappedVertex;
+        }
+      }
+
+      setDrawingCoords((current) => [...current, nextPoint]);
       return;
     }
 
-    let nextPoint = latlng;
+    if (mode === 'edit-single') {
+      const clickedZone = visibleDatasets
+        .filter((dataset) => dataset.id.startsWith('user-mahalas'))
+        .flatMap((dataset) => dataset.zones)
+        .find((zone) => pointInPolygon(latlng, zone.coordinates));
 
-    if (snappingEnabled) {
-      const snappedVertex = getClosestVertex(
-        latlng,
-        visibleDatasets,
-        drawingCoords,
-      );
-      if (snappedVertex) {
-        nextPoint = snappedVertex;
+      if (clickedZone) {
+        setSelectedZoneId(clickedZone.id);
       }
     }
-
-    setDrawingCoords((current) => [...current, nextPoint]);
   };
 
   const handleFinishDraw = () => {
@@ -769,206 +842,385 @@ export default function App() {
     }
   };
 
+  const handleLogin = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    if (
+      loginUsername.trim() === GEOEDITOR_USERNAME &&
+      loginPassword === GEOEDITOR_PASSWORD
+    ) {
+      localStorage.setItem(GEOEDITOR_AUTH_STORAGE_KEY, 'true');
+      setIsAuthenticated(true);
+      setLoginError(null);
+      return;
+    }
+
+    setLoginError('Pogresan korisnik ili lozinka.');
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem(GEOEDITOR_AUTH_STORAGE_KEY);
+    setIsAuthenticated(false);
+    setLoginPassword('');
+    setLoginError(null);
+    setInspectZone(null);
+  };
+
+  if (!isAuthenticated) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-neutral-50 px-4 text-neutral-900">
+        <div className="w-full max-w-md rounded-3xl border border-neutral-200 bg-white p-8 shadow-xl">
+          <div className="mb-8">
+            <p className="text-xs font-semibold uppercase tracking-[0.22em] text-purple-600">
+              Mahala GeoEditor
+            </p>
+            <h1 className="mt-3 text-3xl font-semibold tracking-tight text-neutral-900">
+              Sign in
+            </h1>
+            <p className="mt-2 text-sm text-neutral-500">
+              Enter your geoeditor credentials.
+            </p>
+          </div>
+
+          <form className="space-y-4" onSubmit={handleLogin}>
+            <label className="block">
+              <span className="mb-2 block text-sm font-medium text-neutral-700">
+                Username
+              </span>
+              <input
+                type="text"
+                autoComplete="username"
+                value={loginUsername}
+                onChange={(event) => {
+                  setLoginUsername(event.target.value);
+                  if (loginError) {
+                    setLoginError(null);
+                  }
+                }}
+                className="w-full rounded-2xl border border-neutral-200 bg-neutral-50 px-4 py-3 text-sm text-neutral-900 outline-none transition focus:border-purple-400 focus:bg-white"
+                placeholder="Enter username"
+              />
+            </label>
+
+            <label className="block">
+              <span className="mb-2 block text-sm font-medium text-neutral-700">
+                Password
+              </span>
+              <input
+                type="password"
+                autoComplete="current-password"
+                value={loginPassword}
+                onChange={(event) => {
+                  setLoginPassword(event.target.value);
+                  if (loginError) {
+                    setLoginError(null);
+                  }
+                }}
+                className="w-full rounded-2xl border border-neutral-200 bg-neutral-50 px-4 py-3 text-sm text-neutral-900 outline-none transition focus:border-purple-400 focus:bg-white"
+                placeholder="Enter password"
+              />
+            </label>
+
+            {loginError ? (
+              <p className="text-sm text-rose-500">{loginError}</p>
+            ) : null}
+
+            <button
+              type="submit"
+              className="w-full rounded-2xl bg-purple-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-purple-500"
+            >
+              Sign in
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex h-screen w-full overflow-hidden bg-neutral-50 font-sans text-neutral-900">
       <aside className="z-10 flex w-80 flex-col border-r border-neutral-200 bg-white shadow-sm">
-        <div className="flex items-center space-x-2 border-b border-neutral-100 p-4">
-          <Layers className="h-6 w-6 text-purple-600" />
-          <h1 className="text-lg font-semibold tracking-tight">
-            Mahala GeoEditor
-          </h1>
+        <div className="flex items-center justify-between border-b border-neutral-100 p-4">
+          <div className="flex items-center space-x-2">
+            <Layers className="h-6 w-6 text-purple-600" />
+            <h1 className="text-lg font-semibold tracking-tight">
+              Mahala GeoEditor
+            </h1>
+          </div>
+          <button
+            type="button"
+            onClick={handleLogout}
+            className="rounded-md border border-neutral-200 px-3 py-1.5 text-xs font-semibold text-neutral-600 transition hover:bg-neutral-100"
+          >
+            Logout
+          </button>
         </div>
 
         <div className="flex-grow overflow-y-auto p-4">
-          <h2 className="mb-3 text-xs font-bold uppercase tracking-wider text-neutral-400">
-            Tools
-          </h2>
-          <div className="mb-6 space-y-2">
-            <button
-              onClick={() => {
-                setMode('draw');
-                setDrawingCoords([]);
-              }}
-              className={`w-full rounded-md px-3 py-2 ${
-                mode === 'draw'
-                  ? 'bg-purple-50 text-purple-700'
-                  : 'hover:bg-neutral-100'
-              }`}
-            >
-              <div className="flex items-center font-medium">
-                <Plus className="mr-2 h-4 w-4" />
-                Draw Mahala
-              </div>
-            </button>
-            {mode === 'draw' || mode === 'edit-single' ? (
-              <div className="mt-1 rounded border border-neutral-100 bg-neutral-50 px-3 py-2">
-                <div className="flex items-center justify-between">
-                  <label
-                    htmlFor="snapping"
-                    className="text-sm font-medium text-neutral-600"
-                  >
-                    Snap to existing points
-                  </label>
-                  <input
-                    type="checkbox"
-                    id="snapping"
-                    checked={snappingEnabled}
-                    onChange={(event) => setSnappingEnabled(event.target.checked)}
-                    className="h-4 w-4 rounded text-purple-600 focus:ring-purple-500"
-                  />
-                </div>
-                {mode === 'edit-single' ? (
-                  <p className="mt-2 text-xs leading-5 text-neutral-500">
-                    When this is on, click one vertex to select it, then click
-                    an existing visible point to snap there. Turn it off for
-                    free dragging with no snap checks.
-                  </p>
-                ) : null}
-              </div>
-            ) : null}
-            <button
-              onClick={() => setMode('view')}
-              className={`flex w-full items-center rounded-md px-3 py-2 ${
-                mode === 'view'
-                  ? 'bg-purple-50 font-medium text-purple-700'
-                  : 'hover:bg-neutral-100'
-              }`}
-            >
-              <MousePointer2 className="mr-2 h-4 w-4" />
-              View & Inspect
-            </button>
-            <button
-              onClick={() => setMode('edit-shared')}
-              className={`flex w-full items-center rounded-md px-3 py-2 ${
-                mode === 'edit-shared'
-                  ? 'bg-purple-50 font-medium text-purple-700'
-                  : 'hover:bg-neutral-100'
-              }`}
-            >
-              <Share2 className="mr-2 h-4 w-4" />
-              Edit Shared Borders
-            </button>
-            <button
-              onClick={() => {
-                setMode('edit-single');
-                setSelectedZoneId(null);
-              }}
-              className={`flex w-full items-center rounded-md px-3 py-2 ${
-                mode === 'edit-single'
-                  ? 'bg-purple-50 font-medium text-purple-700'
-                  : 'hover:bg-neutral-100'
-              }`}
-            >
-              <Settings className="mr-2 h-4 w-4" />
-              Edit Single Polygon
-            </button>
-          </div>
-
-          <h2 className="mb-3 text-xs font-bold uppercase tracking-wider text-neutral-400">
-            Basemap
-          </h2>
-          <div className="mb-6 space-y-2">
-            {(Object.entries(BASEMAPS) as [BasemapMode, (typeof BASEMAPS)[BasemapMode]][]).map(
-              ([basemapId, basemap]) => (
-                <button
-                  key={basemapId}
-                  type="button"
-                  onClick={() => setBasemapMode(basemapId)}
-                  className={`w-full rounded-lg border px-3 py-2 text-left transition ${
-                    basemapMode === basemapId
-                      ? 'border-purple-200 bg-purple-50 text-purple-700'
-                      : 'border-neutral-100 bg-neutral-50 hover:bg-neutral-100'
-                  }`}
-                >
-                  <div className="text-sm font-medium">{basemap.label}</div>
-                  <div className="mt-1 text-xs text-neutral-500">
-                    {basemap.description}
-                  </div>
-                </button>
-              ),
-            )}
-          </div>
-
-          <h2 className="mb-3 text-xs font-bold uppercase tracking-wider text-neutral-400">
-            Datasets
-          </h2>
-          <div className="space-y-2">
-            {datasets.map((dataset) => (
-              <div
-                key={dataset.id}
-                className="overflow-hidden rounded-lg border border-neutral-100 bg-neutral-50"
+          <div className="mb-3">
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setLeftTab('tools')}
+                className={`flex-1 rounded-md px-3 py-2 text-sm font-medium ${
+                  leftTab === 'tools'
+                    ? 'bg-purple-50 text-purple-700'
+                    : 'bg-white hover:bg-neutral-100 text-neutral-700 border border-transparent'
+                }`}
               >
-                <div className="flex items-center justify-between bg-white p-3">
-                  <div className="flex items-center space-x-2">
-                    <div
-                      className="h-3 w-3 rounded-full"
-                      style={{ backgroundColor: dataset.color }}
-                    />
-                    <span className="text-sm font-medium">{dataset.name}</span>
-                  </div>
-                  <button
-                    onClick={() => toggleDataset(dataset.id)}
-                    className="rounded p-1 text-neutral-500 hover:bg-neutral-100"
-                  >
-                    {dataset.visible ? (
-                      <Eye className="h-4 w-4" />
-                    ) : (
-                      <EyeOff className="h-4 w-4" />
-                    )}
-                  </button>
-                </div>
-                {dataset.visible ? (
-                  <div className="max-h-48 overflow-y-auto px-3 pb-3">
-                    {dataset.zones.map((zone) => (
-                      <button
-                        key={zone.id}
-                        type="button"
-                        onClick={() => {
-                          setFocusedZone({
-                            datasetId: dataset.id,
-                            zoneId: zone.id,
-                          });
-
-                          if (
-                            mode === 'edit-single' &&
-                            dataset.id === EDITABLE_DATASET_ID
-                          ) {
-                            setSelectedZoneId(zone.id);
-                          }
-                        }}
-                        className="flex w-full items-center justify-between rounded px-1 py-1 text-left text-xs transition hover:bg-neutral-100"
-                      >
-                        <div className="flex min-w-0 items-center gap-2 pr-2">
-                          <span className="truncate">{zone.name}</span>
-                          {dataset.id === EDITABLE_DATASET_ID &&
-                          pendingZoneIdSet.has(zone.id) ? (
-                            <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-700">
-                              dirty
-                            </span>
-                          ) : null}
-                        </div>
-                        <span className="text-neutral-400">
-                          {zone.coordinates.length} pts
-                        </span>
-                      </button>
-                    ))}
-                    {dataset.id === EDITABLE_DATASET_ID &&
-                    loadState === 'loading' ? (
-                      <div className="py-2 text-xs text-neutral-500">
-                        Loading from database...
-                      </div>
-                    ) : null}
-                    {dataset.id === EDITABLE_DATASET_ID &&
-                    loadState === 'error' ? (
-                      <div className="py-2 text-xs text-red-600">
-                        {loadError}
-                      </div>
-                    ) : null}
-                  </div>
-                ) : null}
-              </div>
-            ))}
+                Tools
+              </button>
+              <button
+                type="button"
+                onClick={() => setLeftTab('basemap')}
+                className={`flex-1 rounded-md px-3 py-2 text-sm font-medium ${
+                  leftTab === 'basemap'
+                    ? 'bg-purple-50 text-purple-700'
+                    : 'bg-white hover:bg-neutral-100 text-neutral-700 border border-transparent'
+                }`}
+              >
+                Basemap
+              </button>
+              <button
+                type="button"
+                onClick={() => setLeftTab('datasets')}
+                className={`flex-1 rounded-md px-3 py-2 text-sm font-medium ${
+                  leftTab === 'datasets'
+                    ? 'bg-purple-50 text-purple-700'
+                    : 'bg-white hover:bg-neutral-100 text-neutral-700 border border-transparent'
+                }`}
+              >
+                Datasets
+              </button>
+            </div>
           </div>
+
+          {leftTab === 'tools' && (
+            <div className="mb-6 space-y-2">
+              <button
+                onClick={() => {
+                  setMode('draw');
+                  setDrawingCoords([]);
+                }}
+                className={`w-full rounded-md px-3 py-2 ${
+                  mode === 'draw'
+                    ? 'bg-purple-50 text-purple-700'
+                    : 'hover:bg-neutral-100'
+                }`}
+              >
+                <div className="flex items-center font-medium">
+                  <Plus className="mr-2 h-4 w-4" />
+                  Draw Mahala
+                </div>
+              </button>
+              {mode === 'draw' ? (
+                <div className="mt-1 rounded border border-neutral-100 bg-neutral-50 px-3 py-2">
+                  <div className="flex items-center justify-between">
+                    <label
+                      htmlFor="snapping"
+                      className="text-sm font-medium text-neutral-600"
+                    >
+                      Snap to existing points
+                    </label>
+                    <input
+                      type="checkbox"
+                      id="snapping"
+                      checked={snappingEnabled}
+                      onChange={(event) => setSnappingEnabled(event.target.checked)}
+                      className="h-4 w-4 rounded text-purple-600 focus:ring-purple-500"
+                    />
+                  </div>
+                  <p className="mt-2 text-xs leading-5 text-neutral-500">
+                    When drawing, click existing visible points to snap there.
+                    Turn it off to place points freely.
+                  </p>
+                </div>
+              ) : null}
+              <button
+                onClick={() => setMode('view')}
+                className={`flex w-full items-center rounded-md px-3 py-2 ${
+                  mode === 'view'
+                    ? 'bg-purple-50 font-medium text-purple-700'
+                    : 'hover:bg-neutral-100'
+                }`}
+              >
+                <MousePointer2 className="mr-2 h-4 w-4" />
+                View & Inspect
+              </button>
+              <button
+                onClick={() => setMode('edit-shared')}
+                className={`flex w-full items-center rounded-md px-3 py-2 ${
+                  mode === 'edit-shared'
+                    ? 'bg-purple-50 font-medium text-purple-700'
+                    : 'hover:bg-neutral-100'
+                }`}
+              >
+                <Share2 className="mr-2 h-4 w-4" />
+                Edit Shared Borders
+              </button>
+              <button
+                onClick={() => {
+                  setMode('edit-single');
+                  setSelectedZoneId(null);
+                }}
+                className={`flex w-full items-center rounded-md px-3 py-2 ${
+                  mode === 'edit-single'
+                    ? 'bg-purple-50 font-medium text-purple-700'
+                    : 'hover:bg-neutral-100'
+                }`}
+              >
+                <Settings className="mr-2 h-4 w-4" />
+                Edit Single Polygon
+              </button>
+              {mode === 'edit-single' ? (
+                <div className="mt-1 rounded border border-neutral-100 bg-neutral-50 px-3 py-2">
+                  <div className="flex items-center justify-between">
+                    <label
+                      htmlFor="snapping"
+                      className="text-sm font-medium text-neutral-600"
+                    >
+                      Snap to existing points
+                    </label>
+                    <input
+                      type="checkbox"
+                      id="snapping"
+                      checked={snappingEnabled}
+                      onChange={(event) => setSnappingEnabled(event.target.checked)}
+                      className="h-4 w-4 rounded text-purple-600 focus:ring-purple-500"
+                    />
+                  </div>
+                  <p className="mt-2 text-xs leading-5 text-neutral-500">
+                    When editing a single polygon, click one vertex then click an
+                    existing visible point to snap there. Turn it off for free
+                    dragging with no snap checks.
+                  </p>
+                </div>
+              ) : null}
+            </div>
+          )}
+
+          {leftTab === 'basemap' && (
+            <div>
+              <div className="mb-6 space-y-2">
+                {(Object.entries(BASEMAPS) as [BasemapMode, (typeof BASEMAPS)[BasemapMode]][]).map(
+                  ([basemapId, basemap]) => (
+                    <button
+                      key={basemapId}
+                      type="button"
+                      onClick={() => setBasemapMode(basemapId)}
+                      className={`w-full rounded-lg border px-3 py-2 text-left transition ${
+                        basemapMode === basemapId
+                          ? 'border-purple-200 bg-purple-50 text-purple-700'
+                          : 'border-neutral-100 bg-neutral-50 hover:bg-neutral-100'
+                      }`}
+                    >
+                      <div className="text-sm font-medium">{basemap.label}</div>
+                      <div className="mt-1 text-xs text-neutral-500">
+                        {basemap.description}
+                      </div>
+                    </button>
+                  ),
+                )}
+              </div>
+            </div>
+          )}
+
+          {leftTab === 'datasets' && (
+            <div>
+              <div className="space-y-2">
+                {datasets.map((dataset) => (
+                  <div
+                    key={dataset.id}
+                    className="overflow-hidden rounded-lg border border-neutral-100 bg-neutral-50"
+                  >
+                    <div className="flex items-center justify-between bg-white p-3">
+                      <div className="flex items-center space-x-2">
+                        <div
+                          className="h-3 w-3 rounded-full"
+                          style={{ backgroundColor: dataset.color }}
+                        />
+                        <span className="text-sm font-medium">{dataset.name}</span>
+                      </div>
+                      <button
+                        onClick={() => toggleDataset(dataset.id)}
+                        className="rounded p-1 text-neutral-500 hover:bg-neutral-100"
+                      >
+                        {dataset.visible ? (
+                          <Eye className="h-4 w-4" />
+                        ) : (
+                          <EyeOff className="h-4 w-4" />
+                        )}
+                      </button>
+                    </div>
+                    {dataset.visible ? (
+                      <div className="max-h-48 overflow-y-auto px-3 pb-3">
+                        {dataset.id.startsWith('user-mahalas') ? (
+                          <div className="mb-2">
+                            <input
+                              type="search"
+                              value={mahalaSearch}
+                              onChange={(e) => setMahalaSearch(e.target.value)}
+                              placeholder="Search mahalas"
+                              className="w-full rounded-md border border-neutral-200 bg-white px-3 py-2 text-sm text-neutral-900 outline-none"
+                            />
+                          </div>
+                        ) : null}
+
+                        {(dataset.id.startsWith('user-mahalas') && mahalaSearch.trim()
+                          ? dataset.zones.filter((z) => z.name.toLowerCase().includes(mahalaSearch.trim().toLowerCase()))
+                          : dataset.zones
+                        ).map((zone) => (
+                          <button
+                            key={zone.id}
+                            type="button"
+                            onClick={() => {
+                              setFocusedZone({
+                                datasetId: dataset.id,
+                                zoneId: zone.id,
+                              });
+
+                              if (
+                                mode === 'edit-single' &&
+                                dataset.id.startsWith('user-mahalas')
+                              ) {
+                                setSelectedZoneId(zone.id);
+                              }
+                            }}
+                            className="flex w-full items-center justify-between rounded px-1 py-1 text-left text-xs transition hover:bg-neutral-100"
+                          >
+                            <div className="flex min-w-0 items-center gap-2 pr-2">
+                              <span className="truncate">{zone.name}</span>
+                              {dataset.id.startsWith('user-mahalas') &&
+                              pendingZoneIdSet.has(zone.id) ? (
+                                <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-700">
+                                  dirty
+                                </span>
+                              ) : null}
+                            </div>
+                            <span className="text-neutral-400">
+                              {zone.coordinates.length} pts
+                            </span>
+                          </button>
+                        ))}
+                        {dataset.id.startsWith('user-mahalas') &&
+                        loadState === 'loading' ? (
+                          <div className="py-2 text-xs text-neutral-500">
+                            Loading from database...
+                          </div>
+                        ) : null}
+                        {dataset.id.startsWith('user-mahalas') &&
+                        loadState === 'error' ? (
+                          <div className="py-2 text-xs text-red-600">
+                            {loadError}
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
         {mode === 'draw' ? (
@@ -1067,6 +1319,7 @@ export default function App() {
           <MapController
             onMapClick={handleMapClick}
             setMousePos={setMousePos}
+            setCurrentZoom={setCurrentZoom}
             isDraw={mode === 'draw'}
             snappingEnabled={snappingEnabled}
             datasets={visibleDatasets}
@@ -1085,7 +1338,7 @@ export default function App() {
 
             return dataset.zones.map((zone) => {
               const isSelected =
-                dataset.id === EDITABLE_DATASET_ID &&
+                dataset.id.startsWith('user-mahalas') &&
                 mode === 'edit-single' &&
                 selectedZoneId === zone.id;
 
@@ -1106,27 +1359,39 @@ export default function App() {
                     click: () => {
                       if (
                         mode === 'edit-single' &&
-                        dataset.id === EDITABLE_DATASET_ID
+                        dataset.id.startsWith('user-mahalas')
                       ) {
                         setSelectedZoneId(zone.id);
                         return;
                       }
 
                       if (mode === 'view') {
-                        setZoneMetadata(generateMetadataCode(zone));
+                        setInspectZone(zone);
+                        setInspectDraft(zone);
                       }
                     },
                   }}
                 >
                   {zone.name ? (
-                    <Tooltip
-                      permanent
-                      direction="center"
-                      className="rounded border-none bg-white/80 px-2 py-1 text-xs font-semibold text-neutral-800 shadow-sm"
-                      opacity={0.9}
-                    >
-                      {zone.name}
-                    </Tooltip>
+                    currentZoom >=
+                    (dataset.id === 'sarajevo'
+                      ? BOUNDARY_ZONE_LABEL_MIN_ZOOM
+                      : zone.level === 1
+                      ? USER_MAHALA_LEVEL_1_LABEL_MIN_ZOOM
+                      : USER_MAHALA_LEVEL_2_LABEL_MIN_ZOOM) ? (
+                      <Tooltip
+                        permanent
+                        direction="center"
+                        className="rounded border-none bg-white/80 px-2 py-1 text-xs font-semibold shadow-sm"
+                        opacity={0.9}
+                        style={{
+                          color: dataset.color,
+                          border: `1px solid ${dataset.color}`,
+                        }}
+                      >
+                        {zone.name}
+                      </Tooltip>
+                    ) : null
                   ) : null}
                 </Polygon>
               );
@@ -1226,47 +1491,141 @@ export default function App() {
         </MapContainer>
       </main>
 
-      {zoneMetadata ? (
+      {inspectDraft ? (
         <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-neutral-900/40 p-4 backdrop-blur-sm">
           <div className="flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl bg-white shadow-2xl">
             <div className="flex items-center justify-between border-b border-neutral-100 bg-neutral-50/50 px-5 py-4">
-              <h3 className="text-lg font-semibold text-neutral-800">
-                Polygon Metadata
-              </h3>
-              <button
-                onClick={() => setZoneMetadata(null)}
-                className="rounded-md p-1 text-neutral-400 transition-colors hover:bg-neutral-100 hover:text-neutral-800"
-              >
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  width="20"
-                  height="20"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
+              <h3 className="text-lg font-semibold text-neutral-800">Polygon Details</h3>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => {
+                    // copy raw JSON
+                    navigator.clipboard.writeText(JSON.stringify(inspectDraft, null, 2));
+                  }}
+                  className="rounded-md p-1 text-neutral-500 hover:bg-neutral-100"
                 >
-                  <path d="M18 6 6 18" />
-                  <path d="m6 6 12 12" />
-                </svg>
-              </button>
+                  View Source
+                </button>
+                <button
+                  onClick={() => {
+                    setInspectZone(null);
+                    setInspectDraft(null);
+                  }}
+                  className="rounded-md p-1 text-neutral-400 transition-colors hover:bg-neutral-100 hover:text-neutral-800"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M18 6 6 18" />
+                    <path d="m6 6 12 12" />
+                  </svg>
+                </button>
+              </div>
             </div>
-            <div className="relative flex-grow overflow-auto bg-neutral-900 p-0">
-              <pre className="p-5 font-mono text-xs leading-relaxed text-green-400">
-                {zoneMetadata}
-              </pre>
+
+            <div className="relative flex-grow overflow-auto bg-white p-6">
+              <div className="space-y-4 max-w-2xl">
+                <div>
+                  <div className="text-xs text-neutral-500">Name</div>
+                  <div className="mt-1 text-sm font-medium text-neutral-900">{inspectDraft.name}</div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <label className="block">
+                    <div className="text-xs text-neutral-500">Owner ID</div>
+                    <input
+                      type="number"
+                      value={inspectDraft.owner_id ?? ''}
+                      onChange={(e) =>
+                        setInspectDraft((prev) =>
+                          prev ? { ...prev, owner_id: e.target.value ? Number(e.target.value) : null } : prev,
+                        )
+                      }
+                      className="mt-1 w-full rounded-md border border-neutral-200 px-3 py-2 text-sm text-neutral-900 outline-none"
+                      placeholder="Owner ID"
+                    />
+                  </label>
+
+                  <label className="block">
+                    <div className="text-xs text-neutral-500">Privacy</div>
+                    <select
+                      value={inspectDraft.privacy ?? 0}
+                      onChange={(e) =>
+                        setInspectDraft((prev) => (prev ? { ...prev, privacy: Number(e.target.value) } : prev))
+                      }
+                      className="mt-1 w-full rounded-md border border-neutral-200 px-3 py-2 text-sm text-neutral-900 outline-none"
+                    >
+                      <option value={0}>Public (0)</option>
+                      <option value={1}>Private (1)</option>
+                    </select>
+                  </label>
+                </div>
+
+                <div>
+                  <div className="text-xs text-neutral-500">Level</div>
+                  <select
+                    value={inspectDraft.level ?? 2}
+                    onChange={(e) =>
+                      setInspectDraft((prev) => (prev ? { ...prev, level: Number(e.target.value) } : prev))
+                    }
+                    className="mt-1 w-48 rounded-md border border-neutral-200 px-3 py-2 text-sm text-neutral-900 outline-none"
+                  >
+                    <option value={1}>Level 1</option>
+                    <option value={2}>Level 2</option>
+                  </select>
+                </div>
+
+                <div>
+                  <div className="text-xs text-neutral-500">Points</div>
+                  <div className="mt-1 text-sm text-neutral-700">{inspectDraft.coordinates.length} points</div>
+                </div>
+              </div>
             </div>
-            <div className="flex justify-end border-t border-neutral-100 bg-neutral-50/50 px-5 py-4">
-              <button
-                onClick={() => {
-                  navigator.clipboard.writeText(zoneMetadata);
-                }}
-                className="rounded-lg bg-purple-600 px-5 py-2 text-sm font-medium text-white shadow-sm transition-colors hover:bg-purple-700"
-              >
-                Copy Source Code
-              </button>
+
+            <div className="flex items-center justify-between gap-2 border-t border-neutral-100 bg-neutral-50/50 px-5 py-4">
+              <div className="text-xs text-neutral-500">Tip: use Save to persist changes</div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => {
+                    setInspectZone(null);
+                    setInspectDraft(null);
+                  }}
+                  className="rounded-lg border border-neutral-200 px-4 py-2 text-sm text-neutral-700 hover:bg-neutral-100"
+                >
+                  Close
+                </button>
+                <button
+                  onClick={async () => {
+                    if (!inspectDraft) return;
+                    try {
+                      setSaveState('saving');
+                      const response = await fetch(endpoints.bulkSaveMahalas, {
+                        method: 'POST',
+                        headers: {
+                          Accept: 'application/json',
+                          'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({ mahalas: [inspectDraft] }),
+                      });
+                      const payload = await response.json().catch(() => null);
+                      if (!response.ok) {
+                        throw new Error(payload?.message || 'Failed to save mahala.');
+                      }
+                      // reload from DB
+                      await loadMahalas();
+                      setInspectZone(null);
+                      setInspectDraft(null);
+                      setSaveState('success');
+                      setSaveMessage('Mahala saved.');
+                      setTimeout(() => setSaveMessage(null), 3000);
+                    } catch (err) {
+                      setSaveState('error');
+                      setSaveMessage(err instanceof Error ? err.message : 'Save failed.');
+                    }
+                  }}
+                  className="rounded-lg bg-purple-600 px-5 py-2 text-sm font-medium text-white shadow-sm transition-colors hover:bg-purple-700"
+                >
+                  Save
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -1278,6 +1637,7 @@ export default function App() {
 function MapController({
   onMapClick,
   setMousePos,
+  setCurrentZoom,
   isDraw,
   snappingEnabled,
   datasets,
@@ -1285,12 +1645,13 @@ function MapController({
 }: {
   onMapClick: (coordinate: Coordinate) => void;
   setMousePos: (coordinate: Coordinate | null) => void;
+  setCurrentZoom: (zoom: number) => void;
   isDraw: boolean;
   snappingEnabled: boolean;
   datasets: Dataset[];
   drawingCoords: Coordinate[];
 }) {
-  useMapEvents({
+  const map = useMapEvents({
     click(event) {
       if (!isDraw) {
         return;
@@ -1340,6 +1701,15 @@ function MapController({
       setMousePos(nextCoordinate);
     },
   });
+
+  useEffect(() => {
+    setCurrentZoom(map.getZoom());
+    const handleZoomEnd = () => setCurrentZoom(map.getZoom());
+    map.on('zoomend', handleZoomEnd);
+    return () => {
+      map.off('zoomend', handleZoomEnd);
+    };
+  }, [map]);
 
   return null;
 }
@@ -1583,7 +1953,7 @@ function SingleEditMarkers({
       }
 
       dataset.zones.forEach((zone) => {
-        if (dataset.id === EDITABLE_DATASET_ID && zone.id === selectedZoneId) {
+        if (dataset.id.startsWith('user-mahalas') && zone.id === selectedZoneId) {
           return;
         }
 

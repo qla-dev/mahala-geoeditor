@@ -4,9 +4,14 @@ const env = (import.meta as ImportMeta & {
 
 const baseUrl = (env?.VITE_MAHALA_DB_BASE_URL || '').replace(/\/+$/, '');
 
-const endpoints = {
-  mahalas: `${baseUrl}/db/mahalas`,
-  bulkSaveMahalas: `${baseUrl}/db/mahalas/bulk-save`,
-};
+const endpoints = baseUrl
+  ? {
+      mahalas: `${baseUrl}/mahalas`,
+      bulkSaveMahalas: `${baseUrl}/mahalas/bulk-save`,
+    }
+  : {
+      mahalas: `/db/mahalas`,
+      bulkSaveMahalas: `/db/mahalas/bulk-save`,
+    };
 
 export default endpoints;
