@@ -2,16 +2,12 @@ const env = (import.meta as ImportMeta & {
   env?: Record<string, string | undefined>;
 }).env;
 
-const baseUrl = (env?.VITE_MAHALA_DB_BASE_URL || '').replace(/\/+$/, '');
+const defaultBaseUrl = 'https://trendify.ba/mahala-api/public/api';
+const baseUrl = ((env?.VITE_MAHALA_DB_BASE_URL || defaultBaseUrl) ?? '').replace(/\/+$/, '');
 
-const endpoints = baseUrl
-  ? {
-      mahalas: `${baseUrl}/mahalas`,
-      bulkSaveMahalas: `${baseUrl}/mahalas/bulk-save`,
-    }
-  : {
-      mahalas: `/db/mahalas`,
-      bulkSaveMahalas: `/db/mahalas/bulk-save`,
-    };
+const endpoints = {
+  mahalas: `${baseUrl}/mahalas`,
+  bulkSaveMahalas: `${baseUrl}/mahalas/bulk-save`,
+};
 
 export default endpoints;
